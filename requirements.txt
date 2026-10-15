@@ -1,0 +1,8 @@
+# Swish Annotator (Python 3.9+). Tested with the versions in the comments.
+fastapi>=0.110            # 0.116.1
+uvicorn>=0.29             # 0.35.0
+pydantic>=2.0             # 2.12.3
+python-multipart>=0.0.9   # 0.0.20 (file uploads)
+pillow>=10.0              # 10.2.0
+opencv-python-headless>=4.8   # 4.10.0 (video frames); an existing opencv-python install works too
+anthropic>=0.125          # 0.125.0 (API-key backend; imported always)

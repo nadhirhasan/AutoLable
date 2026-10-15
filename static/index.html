@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swish Annotator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="mode-home">
+<header class="topbar">
+  <a class="brand" href="#/" title="All projects"><span class="logo">◎</span> Swish Annotator</a>
+  <div class="crumb editor-only">
+    <a href="#/" class="back" title="Back to all projects">← Projects</a>
+    <span class="sep">/</span>
+    <span id="projName" class="proj-name"></span>
+  </div>
+  <div class="stats editor-only" id="stats"></div>
+  <div class="spacer"></div>
+  <div id="jobs" class="jobs"></div>
+  <nav class="actions editor-only">
+    <button class="btn" data-modal="importModal">⤓ Import</button>
+    <button class="btn" data-modal="autoModal">✦ Auto-label</button>
+    <button class="btn" data-modal="classesModal">◧ Classes</button>
+    <button class="btn primary" data-modal="exportModal">⇪ Export</button>
+  </nav>
+  <nav class="actions home-only">
+    <button class="btn primary" id="newProjectBtn">＋ New project</button>
+  </nav>
+</header>
+
+<!-- ============ home: projects ============ -->
+<main class="home home-only" id="homeView">
+  <div class="home-inner">
+    <div class="home-head">
+      <div>
+        <h1>Projects</h1>
+        <p class="muted" id="homeSummary"></p>
+      </div>
+      <div class="home-tools">
+        <input id="projSearch" placeholder="Search projects…" autocomplete="off">
+        <select id="projSort" title="Sort">
+          <option value="updated">Recently changed</option>
+          <option value="name">Name</option>
+          <option value="images">Most images</option>
+          <option value="todo">Most left to do</option>
+        </select>
+      </div>
+    </div>
+    <div class="cards" id="cards"></div>
+  </div>
+</main>
+<div class="card-menu" id="cardMenu" hidden>
+  <button data-act="open">↗ Open</button>
+  <button data-act="import">⤓ Import media</button>
+  <button data-act="export">⇪ Export dataset</button>
+  <button data-act="rename">✎ Rename</button>
+  <hr>
+  <button data-act="delete" class="danger-item">🗑 Delete project</button>
+</div>
+
+<!-- ============ annotation page ============ -->
+<main class="layout editor-only">
+  <!-- left: image list -->
+  <aside class="sidebar left">
+    <div class="filters" id="filters">
+      <button data-filter="all" class="chip active">All <b id="cAll">0</b></button>
+      <button data-filter="unlabeled" class="chip">To do <b id="cTodo">0</b></button>
+      <button data-filter="auto" class="chip warn">Review <b id="cAuto">0</b></button>
+      <button data-filter="done" class="chip ok">Done <b id="cDone">0</b></button>
+    </div>
+    <input id="search" class="search" placeholder="Filter by name…" autocomplete="off">
+    <div class="list-tools">
+      <label class="check small"><input type="checkbox" id="pickAll"> Select all in list</label>
+      <span class="muted">Ctrl / Shift+click</span>
+    </div>
+    <div class="bulkbar" id="bulkbar" hidden>
+      <div class="bulk-head"><span><b id="pickedN">0</b> selected</span><button class="link" id="pickClear">clear</button></div>
+      <div class="bulk-actions">
+        <button class="btn sm" data-bulk="autolabel" title="Auto-label the selected images with Claude">✦ Auto-label</button>
+        <button class="btn sm" data-bulk="reviewed" title="Mark the selected images reviewed">✓ Reviewed</button>
+        <button class="btn sm" data-bulk="reset" title="Remove their boxes and put them back to To do">↺ Reset</button>
+        <button class="btn sm danger" data-bulk="delete" title="Delete the selected images and their labels">🗑 Delete</button>
+      </div>
+    </div>
+    <div id="imageList" class="image-list"></div>
+  </aside>
+
+  <!-- center: canvas -->
+  <section class="stage-wrap">
+    <div class="toolbar">
+      <div class="group">
+        <button class="tool active" id="toolDraw" title="Draw boxes (B)">▭ Draw</button>
+        <button class="tool" id="toolSelect" title="Select / move (V)">↖ Select</button>
+      </div>
+      <div class="group">
+        <button class="tool" id="zoomOut" title="Zoom out (−)">−</button>
+        <span id="zoomLabel" class="zoom-label">100%</span>
+        <button class="tool" id="zoomIn" title="Zoom in (+)">+</button>
+        <button class="tool" id="zoomFit" title="Fit (F)">Fit</button>
+        <button class="tool" id="toggleBoxes" title="Hide / show boxes (H)">◉ Boxes</button>
+      </div>
+      <div class="group nav">
+        <button class="tool" id="prevBtn" title="Previous (A)">‹</button>
+        <span id="imgPos" class="pos">–</span>
+        <button class="tool" id="nextBtn" title="Next (D)">›</button>
+      </div>
+      <div class="group right">
+        <span id="saveState" class="save-state"></span>
+        <span id="statusBadge" class="badge"></span>
+      </div>
+    </div>
+    <div id="stage" class="stage">
+      <canvas id="canvas"></canvas>
+      <div id="empty" class="empty">
+        <div class="empty-card">
+          <h2>No images in this project yet</h2>
+          <p>Import a video, images, or a folder.<br>
+            Claude pre-labels the frames; you review and fix the boxes here.</p>
+          <div class="empty-actions">
+            <button class="btn primary" data-modal="importModal">⤓ Import media</button>
+            <a class="btn" href="#/">← All projects</a>
+          </div>
+        </div>
+      </div>
+      <div id="coords" class="coords"></div>
+    </div>
+  </section>
+
+  <!-- right: classes + boxes -->
+  <aside class="sidebar right">
+    <section class="panel">
+      <h3>Classes <small>1-9 to pick</small></h3>
+      <div id="classList" class="class-list"></div>
+    </section>
+    <section class="panel grow">
+      <h3>Boxes <small id="boxCount"></small></h3>
+      <div id="boxList" class="box-list"></div>
+    </section>
+    <section class="panel actions-panel">
+      <button class="btn block" id="autoOneBtn" title="Auto-label this image with Claude (L)">✦ Auto-label this image</button>
+      <div class="row2">
+        <button class="btn block" id="copyPrevBtn" title="Copy boxes from the previous image (P)">⧉ Copy previous</button>
+        <button class="btn block danger-ghost" id="clearBtn" title="Delete all boxes on this image (Shift+Del)">✕ Clear boxes</button>
+      </div>
+      <button class="btn block danger-ghost" id="deleteImageBtn" title="Delete this image and its labels from the project (Ctrl+Del)">🗑 Delete this image</button>
+      <button class="btn block primary big" id="reviewBtn" title="Mark reviewed and go to next (Enter)">✓ Reviewed &amp; next <kbd>Enter</kbd></button>
+      <details class="keys">
+        <summary>Keyboard shortcuts</summary>
+        <dl>
+          <dt>Drag</dt><dd>draw a box (Draw mode)</dd>
+          <dt>Shift+drag</dt><dd>draw even over a box</dd>
+          <dt>Click</dt><dd>select box · drag it to move · handles resize</dd>
+          <dt>1–9</dt><dd>pick class / re-class selected</dd>
+          <dt>Del</dt><dd>delete selected box</dd>
+          <dt>Shift+Del</dt><dd>clear all boxes</dd>
+          <dt>Ctrl+Del</dt><dd>delete this image</dd>
+          <dt>Tab</dt><dd>cycle boxes</dd>
+          <dt>Arrows</dt><dd>nudge selected (Shift = more)</dd>
+          <dt>A / D</dt><dd>previous / next image</dd>
+          <dt>Enter</dt><dd>reviewed &amp; next</dd>
+          <dt>Ctrl+Z / Y</dt><dd>undo / redo</dd>
+          <dt>Space+drag</dt><dd>pan · wheel = zoom</dd>
+          <dt>F / H</dt><dd>fit · hide boxes</dd>
+          <dt>L / P</dt><dd>auto-label · copy previous</dd>
+          <dt>B / V</dt><dd>draw / select mode</dd>
+          <dt>Esc</dt><dd>deselect</dd>
+        </dl>
+      </details>
+    </section>
+  </aside>
+</main>
+
+<!-- ============ modals ============ -->
+<div class="modal" id="newProjectModal">
+  <div class="dialog">
+    <h2>New project</h2>
+    <label>Name<input id="npName" placeholder="e.g. backboard_oct"></label>
+    <label>Classes
+      <select id="npPreset">
+        <option value="ball,made,person,rim,shoot">SwishStation detector · ball, made, person, rim, shoot (drop-in ids)</option>
+        <option value="ball,person">Ball + person only (what the backboard pipeline uses)</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+    <label id="npCustomWrap" hidden>Class names, comma-separated, in id order<input id="npCustom" placeholder="ball,person"></label>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Cancel</button>
+      <button class="btn primary" id="npCreate">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="importModal">
+  <div class="dialog wide">
+    <h2>Import</h2>
+    <div class="tabs" id="importTabs">
+      <button class="tab active" data-tab="tabVideo">🎞 Video</button>
+      <button class="tab" data-tab="tabImages">🖼 Images</button>
+      <button class="tab" data-tab="tabFolder">📁 Folder / path on this PC</button>
+    </div>
+    <div class="tab-body" id="tabVideo">
+      <div class="drop" id="videoDrop">
+        <input type="file" id="videoFiles" accept="video/*" multiple hidden>
+        <p><b>Drop videos here</b> or <a href="#" id="videoPick">browse</a></p>
+        <p class="muted" id="videoChosen">mp4, avi, mov, mkv…</p>
+      </div>
+      <p class="muted center">— or a video file on this PC (faster for big files) —</p>
+      <input id="videoPath" placeholder="C:\...\recordings\20260929_152132\backboard.mp4">
+      <div class="grid4">
+        <label>One frame every (s)<input type="number" id="everyS" value="0.5" min="0" step="0.1"></label>
+        <label>Start at (s)<input type="number" id="startS" value="0" min="0" step="0.5"></label>
+        <label>Stop at (s, 0 = end)<input type="number" id="endS" value="0" min="0" step="0.5"></label>
+        <label>Max frames (0 = all)<input type="number" id="maxFrames" value="0" min="0" step="10"></label>
+      </div>
+      <p class="muted">Frames are taken by video time and named <code>&lt;video&gt;_t&lt;ms&gt;.jpg</code>, so frames close in time stay in the same split at export.</p>
+    </div>
+    <div class="tab-body" id="tabImages" hidden>
+      <div class="drop" id="imageDrop">
+        <input type="file" id="imageFiles" accept="image/*" multiple hidden>
+        <p><b>Drop images here</b> or <a href="#" id="imagePick">browse</a></p>
+        <p class="muted" id="imageChosen">jpg, png, webp, bmp</p>
+      </div>
+    </div>
+    <div class="tab-body" id="tabFolder" hidden>
+      <label>Folder (or a single image / video) on this PC
+        <input id="folderPath" placeholder="C:\datasets\BasketBall-Detection-Dataset-3\train\images">
+      </label>
+      <label class="check"><input type="checkbox" id="folderRecursive" checked> Include sub-folders</label>
+      <label class="check"><input type="checkbox" id="folderLabels" checked> Bring in YOLO labels found next to the images (same class order as this project)</label>
+      <label class="check"><input type="checkbox" id="folderVideos" checked> Also split videos found in the folder (uses the Video tab's frame settings)</label>
+    </div>
+    <div class="progress" id="uploadProgress" hidden><div></div><span></span></div>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Close</button>
+      <button class="btn primary" id="importGo">Import</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="autoModal">
+  <div class="dialog wide">
+    <h2>Auto-label with Claude</h2>
+    <div class="radio-list" id="autoScope">
+      <label><input type="radio" name="scope" value="unlabeled" checked> Images still to do <b id="asTodo"></b></label>
+      <label><input type="radio" name="scope" value="not_reviewed"> Everything not reviewed yet (re-does Claude's earlier boxes) <b id="asNotRev"></b></label>
+      <label><input type="radio" name="scope" value="filtered"> The images in the current list filter <b id="asFiltered"></b></label>
+      <label><input type="radio" name="scope" value="current"> Only the current image</label>
+    </div>
+    <label>Labeling backend
+      <select id="asBackend">
+        <option value="claude_code">Claude subscription (Claude Code login) · no API credits, uses your plan's limits</option>
+        <option value="api">API key (ANTHROPIC_API_KEY) · pay-as-you-go credits</option>
+      </select>
+    </label>
+    <p class="muted" id="asBackendNote"></p>
+    <div class="grid3">
+      <label>Model
+        <select id="asModel">
+          <option value="claude-opus-5-5">Claude Opus 5.5 (default)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (cheaper)</option>
+          <option value="claude-fable-5-1">Claude Fable 5.1 (most capable)</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest)</option>
+        </select>
+      </label>
+      <label>Effort
+        <select id="asEffort">
+          <option value="low">low · 74.5% mAP50</option>
+          <option value="medium">medium</option>
+          <option value="high">high · 76.0%, +40% cost</option>
+        </select>
+      </label>
+      <label>Parallel requests<input type="number" id="asWorkers" min="1" max="16" value="4"></label>
+    </div>
+    <label>Scene description sent with every image
+      <textarea id="asScene" rows="3"></textarea>
+    </label>
+    <label>Extra rules (optional)
+      <textarea id="asHint" rows="2" placeholder="e.g. ignore balls lying on the rack; label the ball even when only half is visible"></textarea>
+    </label>
+    <p class="muted">Class definitions come from <b>Classes</b>. Claude's boxes are marked <span class="tag warn">Review</span> until you check them. Reviewed images are never overwritten except with “Only the current image”.</p>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Cancel</button>
+      <button class="btn primary" id="autoGo">✦ Start</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="classesModal">
+  <div class="dialog wide">
+    <h2>Classes</h2>
+    <p class="muted">The order is the class id (0, 1, 2…). The SwishStation detector expects <code>ball, made, person, rim, shoot</code>. Renaming, reordering and deleting update every label file; deleting a class deletes its boxes. Definitions are sent to Claude.</p>
+    <div id="classEditor" class="class-editor"></div>
+    <button class="btn ghost" id="addClass">＋ Add class</button>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Cancel</button>
+      <button class="btn primary" id="saveClasses">Save classes</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="exportModal">
+  <div class="dialog wide">
+    <h2>Export dataset</h2>
+    <label>Output folder<input id="exOut"></label>
+    <div class="grid3">
+      <label>Valid %<input type="number" id="exVal" value="15" min="0" max="50"></label>
+      <label>Test % (0 = copy of valid)<input type="number" id="exTest" value="10" min="0" max="50"></label>
+      <label>Keep video frames within (s) together<input type="number" id="exGroup" value="10" min="0" step="1"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="exAuto"> Include Claude labels not reviewed yet (<span id="exAutoN">0</span> images)</label>
+    <p class="muted">Exports <b id="exN">0</b> images (reviewed + imported). Writes <code>data.yaml</code> + <code>train|valid|test/images|labels</code> for Ultralytics YOLO (yolo26) and <code>_annotations.coco.json</code> per split for RF-DETR. Re-exporting to the same folder replaces the previous export.</p>
+    <div id="exportResult" class="export-result" hidden></div>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Close</button>
+      <button class="btn primary" id="exportGo">⇪ Export</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="renameModal">
+  <div class="dialog">
+    <h2>Rename project</h2>
+    <label>New name<input id="rnName" autocomplete="off" spellcheck="false"></label>
+    <p class="muted">Renames the project folder. Letters, numbers, <code>-</code> <code>_</code> <code>.</code>; other characters become <code>_</code>. Re-export after renaming: an old export's <code>data.yaml</code> still points at the old folder.</p>
+    <div class="dialog-actions">
+      <button class="btn ghost" data-close>Cancel</button>
+      <button class="btn primary" id="rnGo">Rename</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="confirmModal">
+  <div class="dialog">
+    <h2 id="cfTitle"></h2>
+    <p id="cfBody" class="cf-body"></p>
+    <label id="cfTypeWrap" hidden>Type <b id="cfTypeName"></b> to confirm<input id="cfType" autocomplete="off" spellcheck="false"></label>
+    <div class="dialog-actions">
+      <button class="btn ghost" id="cfCancel">Cancel</button>
+      <button class="btn danger" id="cfOk">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
