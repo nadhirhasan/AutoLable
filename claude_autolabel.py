@@ -55,6 +55,7 @@ Re-running skips images that already have a label file, so you can stop and resu
 
 import argparse
 import base64
+import csv
 import io
 import json
 import math
@@ -64,6 +65,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -126,6 +128,47 @@ SCENE_NOTE = (
 RESOLUTION_TIERS = {"high": (2576, 4784), "standard": (1568, 1568)}
 
 MAX_BASE64_BYTES = 9_500_000  # API limit is 10 MB base64 per image; leave headroom
+
+# API list prices, USD per million tokens (input, output); thinking counts as output. For the per-image cost log
+# (usage.csv): the api backend is billed this; the subscription backend is not billed per token (its tokens also
+# include Claude Code's own turn around the Read tool, so its "API price" is only a rough comparison).
+PRICE_PER_MTOK = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5": (5.0, 25.0),
+                  "claude-fable-5-1": (10.0, 50.0), "claude-haiku-5-5": (0.10, 0.50)}
+USAGE_FIELDS = ["image", "backend", "model", "effort", "image_px", "input_tokens", "output_tokens", "cost_usd",
+                "cli_cost_usd"]
+_usage_lock = threading.Lock()
+
+
+def api_cost(model, input_tokens, output_tokens):
+    """Cost at the API list price, or None for a model without a known price."""
+    price = next((p for m, p in PRICE_PER_MTOK.items() if str(model).startswith(m)), None)
+    if price is None or input_tokens is None or output_tokens is None:
+        return None
+    return (input_tokens * price[0] + output_tokens * price[1]) / 1e6
+
+
+def append_usage(csv_path, row):
+    """One image's tokens and cost appended to usage.csv (thread-safe; header on a new file)."""
+    with _usage_lock:
+        new = not Path(csv_path).exists()
+        with open(csv_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=USAGE_FIELDS, extrasaction="ignore")
+            if new:
+                w.writeheader()
+            w.writerow(row)
+
+
+def usage_summary(rows):
+    """'N images: avg X input / Y output tokens, avg $Z per image at API price' for usage dicts."""
+    rows = [r for r in rows if r.get("input_tokens") is not None]
+    if not rows:
+        return "no token usage recorded"
+    n = len(rows)
+    tin = sum(r["input_tokens"] for r in rows) / n
+    tout = sum(r["output_tokens"] for r in rows) / n
+    costs = [r["cost_usd"] for r in rows if r.get("cost_usd") is not None]
+    cost = f", avg ${sum(costs) / len(costs):.4f} per image at API price (total ${sum(costs):.3f})" if costs else ""
+    return f"{n} images: avg {tin:.0f} input / {tout:.0f} output tokens{cost}"
 
 # Same wording as vlm-exam's _PIXEL_PROMPT_TEMPLATE (detection_coordinate_format: xyxy_absolute_resized_image)
 PROMPT_TEMPLATE = (
@@ -209,8 +252,10 @@ def make_client():
     return anthropic.Anthropic(max_retries=5, timeout=600)
 
 
-def ask_claude(client, img, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, scene=SCENE_NOTE, hint=""):
-    """Claude's raw text answer for one (already resized) image. Raises on a refusal of the whole fallback chain."""
+def ask_claude(client, img, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, scene=SCENE_NOTE, hint="",
+               usage=None):
+    """Claude's raw text answer for one (already resized) image. Raises on a refusal of the whole fallback chain.
+    usage: a dict filled with the call's tokens and cost."""
     data, media_type = encode(img)
     resp = client.beta.messages.create(
         model=model,
@@ -226,6 +271,13 @@ def ask_claude(client, img, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT,
             ],
         }],
     )
+    if usage is not None and getattr(resp, "usage", None) is not None:
+        u = resp.usage
+        tin = ((u.input_tokens or 0) + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+               + (getattr(u, "cache_read_input_tokens", 0) or 0))
+        used = getattr(resp, "model", None) or model
+        usage.update(backend="api", model=used, input_tokens=tin, output_tokens=u.output_tokens,
+                     cost_usd=api_cost(used, tin, u.output_tokens))
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude declined this image")
     texts = [b.text for b in resp.content if b.type == "text"]
@@ -244,9 +296,9 @@ def claude_code_exe():
 
 
 def ask_claude_code(img, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, scene=SCENE_NOTE, hint="",
-                    workdir=None):
+                    workdir=None, usage=None):
     """Claude's raw text answer for one (already resized) image via `claude -p` on the subscription login.
-    Raises UsageLimitError when the plan's limit is reached."""
+    Raises UsageLimitError when the plan's limit is reached. usage: a dict filled with the CLI's reported tokens."""
     exe = claude_code_exe()
     if not exe:
         raise RuntimeError("Claude Code CLI not found: install it and log in with your subscription (`claude`, /login)")
@@ -267,6 +319,12 @@ def ask_claude_code(img, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, sc
     except json.JSONDecodeError:
         reply = {}
     text = str(reply.get("result") or "")
+    u = reply.get("usage") or {}
+    if usage is not None and u:
+        tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        tout = int(u.get("output_tokens") or 0)
+        usage.update(backend="claude_code", model=model, input_tokens=tin, output_tokens=tout,
+                     cost_usd=api_cost(model, tin, tout), cli_cost_usd=reply.get("total_cost_usd"))
     if proc.returncode != 0 or reply.get("is_error") or not reply:
         msg = (text or proc.stderr.strip() or out or f"exit code {proc.returncode}")[:400]
         if USAGE_LIMIT_RE.search(msg):
@@ -336,14 +394,17 @@ def read_yolo(path):
 
 
 def label_image(client, path, classes, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, tier=None,
-                scene=SCENE_NOTE, hint="", backend=DEFAULT_BACKEND, workdir=None):
+                scene=SCENE_NOTE, hint="", backend=DEFAULT_BACKEND, workdir=None, usage=None):
     """One image -> (boxes [(cid, x1, y1, x2, y2) normalised], raw answer). classes: [{name, description}].
-    client: an anthropic.Anthropic for the api backend (unused by claude_code); tier None = the backend's default."""
+    client: an anthropic.Anthropic for the api backend (unused by claude_code); tier None = the backend's default.
+    usage: a dict filled with the image's tokens and cost (USAGE_FIELDS)."""
     img = load_image(path, tier or BACKEND_TIER[backend])
+    if usage is not None:
+        usage.update(image=Path(path).name, effort=effort, image_px=f"{img.size[0]}x{img.size[1]}")
     if backend == "claude_code":
-        answer = ask_claude_code(img, classes, model, effort, scene, hint, workdir)
+        answer = ask_claude_code(img, classes, model, effort, scene, hint, workdir, usage)
     else:
-        answer = ask_claude(client, img, classes, model, effort, scene, hint)
+        answer = ask_claude(client, img, classes, model, effort, scene, hint, usage)
     if not answer:
         raise RuntimeError("empty answer")
     return to_boxes(parse_answer(answer), [c["name"] for c in classes], *img.size), answer
@@ -368,15 +429,25 @@ def process(path, args, client, classes, out):
     label_path = out / "labels" / f"{path.stem}.txt"
     if label_path.exists():
         return path.name, "skipped"
+    usage = {}
     boxes, answer = label_image(client, path, classes, args.model, args.effort, args.tier, SCENE_NOTE, args.hint,
-                                args.backend)
+                                args.backend, usage=usage)
+    if usage.get("input_tokens") is not None:
+        append_usage(out / "usage.csv", usage)
+        USAGE_ROWS.append(usage)
     (out / "raw" / f"{path.stem}.txt").write_text(answer)
     shutil.copy2(path, out / "images" / path.name)
     lines = yolo_lines(boxes)
     label_path.write_text("\n".join(lines) + ("\n" if lines else ""))
     if not args.no_preview:
         draw_preview(path, boxes, [c["name"] for c in classes], out / "previews" / f"{path.stem}.jpg")
-    return path.name, f"{len(lines)} boxes"
+    cost = f", ${usage['cost_usd']:.4f}" if usage.get("cost_usd") is not None else ""
+    toks = (f", {usage['input_tokens']} in / {usage['output_tokens']} out tokens{cost}"
+            if usage.get("input_tokens") is not None else "")
+    return path.name, f"{len(lines)} boxes{toks}"
+
+
+USAGE_ROWS = []                 # every image's usage dict of this run (summary at the end)
 
 
 def main():
@@ -434,6 +505,7 @@ def main():
                 failed += 1
                 print(f"[{done + failed}/{len(paths)}] {futures[fut].name}: FAILED ({e})")
     print(f"\nDone: {done} ok, {failed} failed. Check {out}/previews, then review the boxes in the annotator.")
+    print(f"Usage ({out / 'usage.csv'}): {usage_summary(USAGE_ROWS)}")
 
 
 if __name__ == "__main__":

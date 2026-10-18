@@ -101,8 +101,38 @@ The Export dialog shows both commands with the real path filled in.
 ## Usage limits and cost
 
 - **Subscription:** each frame is one Claude Code request. In our tests it took about 6 seconds per frame (Claude Opus 5.5, effort low). Keep **Parallel requests** at 2–3. When your plan's limit is reached, the run stops and says so; frames already labeled are kept, and **Images still to do** continues later.
-- **API key:** roughly $0.02–0.04 per 1080p frame on Opus 5.5 at effort low (an estimate; check the real spend in the Console after a small batch). Sonnet 5.5 is about half that.
+- **API key:** about $0.016 per 1920×1080 frame on Opus 5.5 (see below). Sonnet 5.5 is about half that.
 - Try about 20 frames first and check the boxes before labeling thousands.
+
+### Cost per image
+
+Every labeled image is logged in `usage.csv` (the project folder in the app, the `--out` folder on the command line): image size sent, input and output tokens, and the cost at the API list price. The app's job message and the command line's last line show the average per image.
+
+**Measured on 10 basketball frames** (2026-10-18; Opus 5.5, subscription backend; backboard and rim cameras):
+
+| Effort | Output tokens per frame (min–max, average) |
+|---|---|
+| low | 86–201, average 148 |
+| high | 85–320, average 206 |
+
+The model hardly thinks on these frames, so effort high costs only about $0.001 more per frame than low. The cost is almost all **input**, mainly the image.
+
+**What one frame costs on the API key backend** (Opus 5.5: $4 per million input tokens, $20 per million output; worked out from the measured tokens, not a billed run):
+
+| | Tokens | Cost |
+|---|---|---|
+| Image, 1920×1080 sent at full size | about 2,700 | $0.011 |
+| Prompt: the detection instruction (~100) plus the class rules and scene note (~480) | about 580 | $0.002 |
+| Output, effort low / high | about 150 / 200 | $0.003 / $0.004 |
+| **Total** | | **about $0.016 (low) / $0.017 (high)** |
+
+- The subscription backend's own token counts are higher (about 6,250 input tokens per frame), because Claude Code adds its tool setup and an extra turn to open the image. Its images are sent at 1456×819. It is not billed per token: it counts against the plan.
+- **Cheaper:** a smaller image (1456×819 is about 1,560 image tokens, saving about $0.004 per frame) or shorter class rules (up to about $0.002). Both can make the boxes worse (small far-away balls, the made / not-made rule), so compare the boxes on the same frames before switching.
+
+**Compared with the Roboflow Playground** (which showed $0.0087 per frame for Claude Opus 5.5 on a 1920×1080 frame):
+- Roboflow's open-source Claude block ([roboflow/inference](https://github.com/roboflow/inference/blob/main/workflows/roboflow_workflows/core_steps/models/foundation/anthropic_claude/v5.py)) sends detection images the same way as this app: at the size Claude uses internally, with the same 2576 px / 4784-token limit, so a 1920×1080 frame goes at full size. It also uses the same detection prompt (from the vlm-exam benchmark), without the class rules.
+- At the API list price, that request is about 2,800 input tokens, which is about $0.011 before any output. The Playground's $0.0087 is below that, so it does something the open-source block doesn't show: it shrinks the upload first, uses its own price, or runs different code. Not known.
+- At the same list price, Roboflow's request would cost about $0.013–0.014 per frame and this app's about $0.016. The difference is the class rules.
 
 ## Troubleshooting
 
@@ -119,4 +149,4 @@ The Export dialog shows both commands with the real path filled in.
 - `annotator_app.py`: the web app (FastAPI)
 - `claude_autolabel.py`: the Claude labeling engine; also works on its own from the command line (`python claude_autolabel.py --help`)
 - `static/`: the browser UI
-- `projects/` (created on first run): one folder per project with `images/`, `labels/` (YOLO), `project.json` and the default `export/`
+- `projects/` (created on first run): one folder per project with `images/`, `labels/` (YOLO), `project.json`, `usage.csv` (tokens and cost per labeled image) and the default `export/`

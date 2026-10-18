@@ -320,13 +320,18 @@ def autolabel_job(job, proj, names):
     tmp = proj.path / "tmp"
     tmp.mkdir(exist_ok=True)
     job.message = f"{s['model']} · effort {s['effort']} · {'subscription' if backend == 'claude_code' else 'API'}"
+    usage_rows = []                                           # tokens / cost per image, also in <project>/usage.csv
 
     def one(name):
         if job.cancel:
             return name, None
         img = proj.image(name)
+        usage = {}
         boxes, answer = cal.label_image(client, img, classes, s["model"], s["effort"], s.get("tier") or None,
-                                        s["scene"], s["hint"], backend, tmp)
+                                        s["scene"], s["hint"], backend, tmp, usage=usage)
+        if usage.get("input_tokens") is not None:
+            cal.append_usage(proj.path / "usage.csv", usage)
+            usage_rows.append(usage)
         if not img.exists():                                  # deleted while Claude was looking at it
             return name, None
         (proj.path / "raw" / f"{img.stem}.txt").write_text(answer)
@@ -362,6 +367,8 @@ def autolabel_job(job, proj, names):
             if (job.done + job.failed) % 10 == 0:
                 proj.save()
     proj.save()
+    if usage_rows and job.state != "error":
+        job.message += f" · {cal.usage_summary(usage_rows)}"
 
 
 # ------------------------------------------------------------------------------------------------------------ export
